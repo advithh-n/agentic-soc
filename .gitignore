@@ -1,0 +1,56 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Dashboard
+node_modules/
+.next/
+out/
+.turbo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker volumes (if bind-mounted)
+postgres_data/
+neo4j_data/
+redis_data/
+minio_data/
+n8n_data/
+prometheus_data/
+
+# Secrets
+*.pem
+*.key
+credentials.json
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml
+.env

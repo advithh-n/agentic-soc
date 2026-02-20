@@ -1,0 +1,323 @@
+# ============================================================
+# Agentic SOC v5 — Docker Compose
+# 12 services: 4 data + 4 application + 1 frontend + 3 infra
+# ============================================================
+
+services:
+
+  # ─── DATA LAYER ──────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: soc-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${PG_DB}
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASS}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - soc-data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: soc-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASS}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_max__size: "512m"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASS} 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - soc-data
+    restart: unless-stopped
+
+  redis:
+    image: redis/redis-stack:latest
+    container_name: soc-redis
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    environment:
+      REDIS_ARGS: "--requirepass ${REDIS_PASS} --maxmemory 512mb --maxmemory-policy allkeys-lru"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASS}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - soc-data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: soc-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASS}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - soc-data
+    restart: unless-stopped
+
+  # ─── APPLICATION LAYER ──────────────────────────────────
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: soc-api
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./api/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${PG_USER}:${PG_PASS}@postgres:5432/${PG_DB}
+      REDIS_URL: redis://:${REDIS_PASS}@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASS: ${NEO4J_PASS}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_USER}
+      MINIO_SECRET_KEY: ${MINIO_PASS}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8050/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - soc-data
+      - soc-app
+    restart: unless-stopped
+
+  module-engine:
+    build:
+      context: ./modules
+      dockerfile: Dockerfile
+    container_name: soc-modules
+    volumes:
+      - ./modules/engine:/app/engine
+      - ./modules/stripe_carding:/app/stripe_carding
+      - ./modules/auth_anomaly:/app/auth_anomaly
+      - ./modules/infrastructure:/app/infrastructure
+      - ./modules/ai_agent_monitor:/app/ai_agent_monitor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${PG_USER}:${PG_PASS}@postgres:5432/${PG_DB}
+      REDIS_URL: redis://:${REDIS_PASS}@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASS: ${NEO4J_PASS}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8060/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - soc-data
+      - soc-app
+    restart: unless-stopped
+
+  agent-runtime:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile
+    container_name: soc-agents
+    volumes:
+      - ./agents/runtime:/app/runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      mcp-servers:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${PG_USER}:${PG_PASS}@postgres:5432/${PG_DB}
+      REDIS_URL: redis://:${REDIS_PASS}@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASS: ${NEO4J_PASS}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MCP_SERVER_URL: http://mcp-servers:8100
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - soc-data
+      - soc-app
+    restart: unless-stopped
+
+  mcp-servers:
+    build:
+      context: ./mcp-servers
+      dockerfile: Dockerfile
+    container_name: soc-mcp
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://:${REDIS_PASS}@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASS: ${NEO4J_PASS}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      VT_API_KEY: ${VT_API_KEY}
+      ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-4}
+      WAZUH_API_URL: ${WAZUH_API_URL:-}
+      WAZUH_API_USER: ${WAZUH_API_USER:-}
+      WAZUH_API_PASS: ${WAZUH_API_PASS:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    networks:
+      - soc-data
+      - soc-app
+    restart: unless-stopped
+
+  # ─── FRONTEND ────────────────────────────────────────────
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      target: dev
+    container_name: soc-dashboard
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dashboard/src:/app/src
+      - ./dashboard/public:/app/public
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8050
+      NEXT_PUBLIC_WS_URL: ws://localhost:8050
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - soc-app
+    restart: unless-stopped
+
+  # ─── INFRASTRUCTURE ─────────────────────────────────────
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: soc-n8n
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASS}
+      WEBHOOK_URL: http://api:8050
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - soc-app
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.0
+    container_name: soc-traefik
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - soc-app
+    restart: unless-stopped
+
+  # ─── MONITORING ──────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: soc-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - soc-app
+      - soc-data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  redis_data:
+  minio_data:
+  n8n_data:
+  prometheus_data:
+
+networks:
+  soc-data:
+    driver: bridge
+    name: soc-data
+  soc-app:
+    driver: bridge
+    name: soc-app

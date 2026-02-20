@@ -1,0 +1,22 @@
+# Agentic SOC v5 — Traefik Configuration
+api:
+  dashboard: true
+  insecure: true  # Dashboard on :8080 — disable in production
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+log:
+  level: INFO
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json

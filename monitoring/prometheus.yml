@@ -1,0 +1,33 @@
+# Agentic SOC v5 — Prometheus Scrape Config
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "soc-api"
+    static_configs:
+      - targets: ["soc-api:8050"]
+    metrics_path: /api/v1/metrics
+
+  - job_name: "soc-modules"
+    static_configs:
+      - targets: ["soc-modules:8060"]
+    metrics_path: /metrics
+
+  - job_name: "soc-agents"
+    static_configs:
+      - targets: ["soc-agents:8070"]
+    metrics_path: /metrics
+
+  - job_name: "traefik"
+    static_configs:
+      - targets: ["soc-traefik:8080"]
+    metrics_path: /metrics
+
+  - job_name: "redis"
+    static_configs:
+      - targets: ["soc-redis:6379"]
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
