@@ -29,6 +29,7 @@ from scenarios.auth_brute_force import run_brute_force, run_credential_stuffing,
 from scenarios.iam_escalation import run_iam_escalation
 from scenarios.false_positive import run_false_positive_scenario
 from scenarios.ai_agent_attack import run_ai_agent_attacks
+from scenarios.recon_scan import run_recon_scan
 
 API_BASE = "http://localhost:8050/api/v1"
 
@@ -61,6 +62,13 @@ EXPECTED_AI_RULES = {
     "ai_agent.guardrail_block",
     "ai_agent.excessive_tool_calls",
     "ai_agent.token_abuse",
+}
+
+EXPECTED_RECON_RULES = {
+    "recon.port_change_detected",
+    "recon.new_cve_found",
+    "recon.cert_expiry_warning",
+    "recon.dns_drift",
 }
 
 
@@ -133,12 +141,17 @@ async def main():
         ai_results = await run_ai_agent_attacks(delay_seconds=0.15)
         print()
 
+        print("  >>> SCENARIO 6: Infrastructure Recon Scan")
+        recon_results = await run_recon_scan(delay_seconds=0.2)
+        print()
+
         total_sent = (
             carding_results["total_sent"]
             + auth_sent
             + infra_results["total_sent"]
             + fp_results["total_sent"]
             + ai_results["total_sent"]
+            + recon_results["total_sent"]
         )
         total_ingested = (
             carding_results["successful_ingests"]
@@ -146,6 +159,7 @@ async def main():
             + infra_results["successful_ingests"]
             + fp_results["successful_ingests"]
             + ai_results["successful_ingests"]
+            + recon_results["successful_ingests"]
         )
         print(f"  Total events sent: {total_sent}")
         print(f"  Successfully ingested: {total_ingested}")
@@ -182,6 +196,7 @@ async def main():
         auth_alerts = []
         infra_alerts = []
         ai_alerts = []
+        recon_alerts = []
         other_alerts = []
         triaged_count = 0
         verdicts = {"true_positive": 0, "false_positive": 0, "needs_investigation": 0, "unknown": 0}
@@ -198,6 +213,8 @@ async def main():
                 infra_alerts.append(alert)
             elif et.startswith("ai_agent."):
                 ai_alerts.append(alert)
+            elif et.startswith("recon."):
+                recon_alerts.append(alert)
             else:
                 other_alerts.append(alert)
 
@@ -261,6 +278,16 @@ async def main():
             icon = "PASS" if rule in ai_detected else "MISS"
             print(f"    [{icon}] {rule}")
 
+        # Recon detection
+        recon_detected = detected_rules & EXPECTED_RECON_RULES
+        recon_rate = len(recon_detected) / len(EXPECTED_RECON_RULES) * 100
+
+        print(f"\n  RECON SCAN DETECTION: {recon_rate:.0f}%")
+        print(f"    Alerts generated: {len(recon_alerts)}")
+        for rule in sorted(EXPECTED_RECON_RULES):
+            icon = "PASS" if rule in recon_detected else "MISS"
+            print(f"    [{icon}] {rule}")
+
         # Triage results
         print(f"\n  TRIAGE AGENT RESULTS:")
         print(f"    Alerts triaged: {triaged_count}/{len(all_alerts)}")
@@ -269,8 +296,8 @@ async def main():
                 print(f"    {v}: {count}")
 
         # Overall
-        overall_rules = len(carding_detected) + len(auth_detected) + len(infra_detected) + len(ai_detected)
-        total_expected = len(EXPECTED_CARDING_RULES) + len(EXPECTED_AUTH_RULES) + len(EXPECTED_INFRA_RULES) + len(EXPECTED_AI_RULES)
+        overall_rules = len(carding_detected) + len(auth_detected) + len(infra_detected) + len(ai_detected) + len(recon_detected)
+        total_expected = len(EXPECTED_CARDING_RULES) + len(EXPECTED_AUTH_RULES) + len(EXPECTED_INFRA_RULES) + len(EXPECTED_AI_RULES) + len(EXPECTED_RECON_RULES)
         overall_rate = overall_rules / total_expected * 100 if total_expected else 0
 
         print(f"\n  OVERALL DETECTION RATE: {overall_rate:.0f}% ({overall_rules}/{total_expected} rules)")

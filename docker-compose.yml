@@ -147,6 +147,7 @@ services:
       - ./modules/auth_anomaly:/app/auth_anomaly
       - ./modules/infrastructure:/app/infrastructure
       - ./modules/ai_agent_monitor:/app/ai_agent_monitor
+      - ./modules/recon:/app/recon
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,6 +194,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       MCP_SERVER_URL: http://mcp-servers:8100
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]

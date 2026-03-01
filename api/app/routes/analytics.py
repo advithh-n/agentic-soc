@@ -77,6 +77,7 @@ async def analytics_overview(
                 WHEN event_type LIKE 'auth.%%' THEN 'auth_anomaly'
                 WHEN event_type LIKE 'infra.%%' THEN 'infrastructure'
                 WHEN event_type LIKE 'ai_agent.%%' THEN 'ai_agent_monitor'
+                WHEN event_type LIKE 'recon.%%' THEN 'recon'
                 ELSE 'unknown'
             END as module,
             count(*) as alert_count,
@@ -354,4 +355,104 @@ async def system_health(current_user: dict = Depends(get_current_user)):
         "overall": "healthy" if all_healthy else "degraded",
         "services": services,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ─── Complete rule → technique mapping for coverage reporting ─────
+
+_RULE_REGISTRY = {
+    "carding.multi_card_velocity": {"module": "stripe_carding", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "carding.small_amount_testing": {"module": "stripe_carding", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "carding.bin_cycling": {"module": "stripe_carding", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "carding.rapid_sequence": {"module": "stripe_carding", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "carding.high_failure_rate": {"module": "stripe_carding", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "auth.brute_force": {"module": "auth_anomaly", "technique": "T1110.001", "framework": "mitre", "tactic": "Credential Access"},
+    "auth.credential_stuffing": {"module": "auth_anomaly", "technique": "T1110.004", "framework": "mitre", "tactic": "Credential Access"},
+    "auth.impossible_travel": {"module": "auth_anomaly", "technique": "T1078", "framework": "mitre", "tactic": "Defense Evasion"},
+    "auth.session_anomaly": {"module": "auth_anomaly", "technique": "T1078", "framework": "mitre", "tactic": "Defense Evasion"},
+    "auth.privilege_escalation": {"module": "auth_anomaly", "technique": "T1078.004", "framework": "mitre", "tactic": "Privilege Escalation"},
+    "infra.iam_escalation": {"module": "infrastructure", "technique": "T1078.004", "framework": "mitre", "tactic": "Privilege Escalation"},
+    "infra.s3_unauthorized": {"module": "infrastructure", "technique": "T1530", "framework": "mitre", "tactic": "Collection"},
+    "infra.security_group_change": {"module": "infrastructure", "technique": "T1562.007", "framework": "mitre", "tactic": "Defense Evasion"},
+    "infra.file_integrity": {"module": "infrastructure", "technique": "T1565.001", "framework": "mitre", "tactic": "Impact"},
+    "infra.web_attack": {"module": "infrastructure", "technique": "T1190", "framework": "mitre", "tactic": "Initial Access"},
+    "ai_agent.prompt_injection": {"module": "ai_agent_monitor", "technique": "AML.T0051", "framework": "atlas", "tactic": "Initial Access"},
+    "ai_agent.jailbreak_attempt": {"module": "ai_agent_monitor", "technique": "AML.T0054", "framework": "atlas", "tactic": "Defense Evasion"},
+    "ai_agent.data_exfiltration": {"module": "ai_agent_monitor", "technique": "AML.T0024", "framework": "atlas", "tactic": "Exfiltration"},
+    "ai_agent.guardrail_block": {"module": "ai_agent_monitor", "technique": "AML.T0051", "framework": "atlas", "tactic": "Initial Access"},
+    "ai_agent.excessive_tool_calls": {"module": "ai_agent_monitor", "technique": "AML.T0043", "framework": "atlas", "tactic": "Impact"},
+    "ai_agent.token_abuse": {"module": "ai_agent_monitor", "technique": "AML.T0040", "framework": "atlas", "tactic": "Collection"},
+    "ai_agent.hallucination": {"module": "ai_agent_monitor", "technique": "AML.T0048", "framework": "atlas", "tactic": "Impact"},
+    "ai_agent.tool_call_loop": {"module": "ai_agent_monitor", "technique": "AML.T0043", "framework": "atlas", "tactic": "Impact"},
+    "ai_agent.duplicate_tool_calls": {"module": "ai_agent_monitor", "technique": "AML.T0043", "framework": "atlas", "tactic": "Impact"},
+    "ai_agent.high_tool_error_rate": {"module": "ai_agent_monitor", "technique": "AML.T0043", "framework": "atlas", "tactic": "Impact"},
+    "recon.port_change_detected": {"module": "recon", "technique": "T1046", "framework": "mitre", "tactic": "Discovery"},
+    "recon.new_cve_found": {"module": "recon", "technique": "T1190", "framework": "mitre", "tactic": "Initial Access"},
+    "recon.cert_expiry_warning": {"module": "recon", "technique": "T1556", "framework": "mitre", "tactic": "Credential Access"},
+    "recon.dns_drift": {"module": "recon", "technique": "T1584.002", "framework": "mitre", "tactic": "Resource Development"},
+}
+
+
+@router.get("/detection-coverage")
+async def detection_coverage(
+    db: AsyncSession = Depends(set_tenant_context),
+    current_user: dict = Depends(get_current_user),
+):
+    """Detection rule coverage — tested vs theoretical MITRE coverage."""
+    # Get all distinct event_types that have actually fired
+    result = await db.execute(text("""
+        SELECT event_type, count(*) as alert_count
+        FROM alerts
+        GROUP BY event_type
+    """))
+    detected_rules = {r.event_type: r.alert_count for r in result.fetchall()}
+
+    # Build per-rule coverage
+    rules = []
+    for rule_name, info in _RULE_REGISTRY.items():
+        fired = rule_name in detected_rules
+        rules.append({
+            "rule": rule_name,
+            "module": info["module"],
+            "technique": info["technique"],
+            "framework": info["framework"],
+            "tactic": info["tactic"],
+            "fired": fired,
+            "alert_count": detected_rules.get(rule_name, 0),
+        })
+
+    # Build per-technique coverage
+    techniques: dict[str, dict] = {}
+    for rule_name, info in _RULE_REGISTRY.items():
+        tid = info["technique"]
+        if tid not in techniques:
+            techniques[tid] = {
+                "technique_id": tid,
+                "framework": info["framework"],
+                "tactic": info["tactic"],
+                "rules_total": 0,
+                "rules_fired": 0,
+                "alert_count": 0,
+            }
+        techniques[tid]["rules_total"] += 1
+        if rule_name in detected_rules:
+            techniques[tid]["rules_fired"] += 1
+            techniques[tid]["alert_count"] += detected_rules.get(rule_name, 0)
+
+    technique_list = list(techniques.values())
+
+    # Summary
+    total_rules = len(_RULE_REGISTRY)
+    fired_count = sum(1 for r in rules if r["fired"])
+    techniques_covered = sum(1 for t in technique_list if t["rules_fired"] > 0)
+
+    return {
+        "total_rules": total_rules,
+        "rules_fired": fired_count,
+        "detection_rate_pct": round(fired_count / total_rules * 100, 1) if total_rules else 0,
+        "total_techniques": len(technique_list),
+        "techniques_covered": techniques_covered,
+        "technique_coverage_pct": round(techniques_covered / len(technique_list) * 100, 1) if technique_list else 0,
+        "rules": rules,
+        "techniques": technique_list,
     }

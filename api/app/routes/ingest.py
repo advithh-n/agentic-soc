@@ -245,9 +245,12 @@ async def ingest_generic(
     stream_map = {
         "stripe": "streams:stripe",
         "clerk": "streams:auth",
+        "auth": "streams:auth",
         "aws": "streams:infra",
         "wazuh": "streams:infra",
         "langfuse": "streams:ai",
+        "nemo_guardrails": "streams:ai",
+        "recon_scanner": "streams:recon",
     }
     stream = f"{tenant_id}:{stream_map.get(payload.source, 'streams:generic')}"
 

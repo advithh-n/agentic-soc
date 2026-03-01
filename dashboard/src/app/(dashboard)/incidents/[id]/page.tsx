@@ -583,10 +583,29 @@ export default function IncidentDetailPage() {
             </button>
             {reportData && (
               <button
-                onClick={() => window.print()}
-                className="px-4 py-2 bg-soc-surface border border-soc-border rounded-lg text-xs text-gray-300 hover:text-white"
+                onClick={async () => {
+                  try {
+                    const token = localStorage.getItem("token");
+                    const resp = await fetch(
+                      `${process.env.NEXT_PUBLIC_API_URL}/api/v1/incidents/${id}/report/pdf`,
+                      { headers: { Authorization: `Bearer ${token}` } }
+                    );
+                    if (!resp.ok) throw new Error("PDF generation failed");
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `incident_${id.slice(0, 8)}_report.pdf`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (e) {
+                    console.error("PDF download failed:", e);
+                  }
+                }}
+                className="px-4 py-2 bg-soc-surface border border-soc-border rounded-lg text-xs text-gray-300 hover:text-white flex items-center gap-2"
               >
-                Print / Save PDF
+                <FileText className="h-3.5 w-3.5" />
+                Download PDF
               </button>
             )}
           </div>

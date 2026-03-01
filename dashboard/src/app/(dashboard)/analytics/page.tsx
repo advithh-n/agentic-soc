@@ -21,11 +21,13 @@ import {
   getAlertTimeline,
   getAgentPerformance,
   getActionBreakdown,
+  getDetectionCoverage,
   type AnalyticsOverview,
   type MitreHeatmap,
   type AlertTimeline,
   type AgentPerformance,
   type ActionBreakdown,
+  type DetectionCoverage,
 } from "@/lib/api";
 
 // MITRE technique labels
@@ -63,24 +65,27 @@ export default function AnalyticsPage() {
   const [timeline, setTimeline] = useState<AlertTimeline | null>(null);
   const [agent, setAgent] = useState<AgentPerformance | null>(null);
   const [actionBreakdown, setActionBreakdown] = useState<ActionBreakdown | null>(null);
+  const [coverage, setCoverage] = useState<DetectionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"overview" | "mitre" | "agents" | "actions">("overview");
 
   useEffect(() => {
     async function load() {
       try {
-        const [o, m, t, a, ab] = await Promise.all([
+        const [o, m, t, a, ab, cov] = await Promise.all([
           getAnalyticsOverview(),
           getMitreHeatmap(),
           getAlertTimeline(48),
           getAgentPerformance(),
           getActionBreakdown(),
+          getDetectionCoverage(),
         ]);
         setOverview(o);
         setMitre(m);
         setTimeline(t);
         setAgent(a);
         setActionBreakdown(ab);
+        setCoverage(cov);
       } catch (err) {
         console.error("Failed to load analytics:", err);
       } finally {
@@ -220,17 +225,142 @@ export default function AnalyticsPage() {
       {/* MITRE Heatmap Tab */}
       {tab === "mitre" && mitre && (
         <div className="space-y-6">
-          <StatsCard
-            label="Total Techniques Detected"
-            value={mitre.total_techniques}
-            icon={<Target className="w-5 h-5" />}
-            accentColor="bg-red-500"
-          />
+          {/* Coverage KPIs */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatsCard
+              label="Techniques Detected"
+              value={mitre.total_techniques}
+              icon={<Target className="w-5 h-5" />}
+              accentColor="bg-red-500"
+            />
+            {coverage && (
+              <>
+                <StatsCard
+                  label="Rule Coverage"
+                  value={`${coverage.detection_rate_pct}%`}
+                  icon={<Shield className="w-5 h-5" />}
+                  accentColor={coverage.detection_rate_pct >= 80 ? "bg-green-500" : coverage.detection_rate_pct >= 60 ? "bg-yellow-500" : "bg-red-500"}
+                />
+                <StatsCard
+                  label="Rules Firing"
+                  value={`${coverage.rules_fired}/${coverage.total_rules}`}
+                  icon={<Zap className="w-5 h-5" />}
+                  accentColor="bg-blue-500"
+                />
+                <StatsCard
+                  label="Technique Coverage"
+                  value={`${coverage.technique_coverage_pct}%`}
+                  icon={<Target className="w-5 h-5" />}
+                  accentColor={coverage.technique_coverage_pct >= 80 ? "bg-green-500" : "bg-yellow-500"}
+                />
+              </>
+            )}
+          </div>
 
-          {/* MITRE ATT&CK */}
+          {/* Detection Coverage Matrix */}
+          {coverage && coverage.techniques.length > 0 && (
+            <div className="card p-6">
+              <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">Detection Coverage Matrix</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {coverage.techniques.map((tech, i) => {
+                  const allFired = tech.rules_fired === tech.rules_total;
+                  const someFired = tech.rules_fired > 0;
+                  const bgColor = allFired
+                    ? "rgba(34, 197, 94, 0.15)"
+                    : someFired
+                    ? "rgba(234, 179, 8, 0.12)"
+                    : "rgba(239, 68, 68, 0.1)";
+                  const borderColor = allFired
+                    ? "border-green-700"
+                    : someFired
+                    ? "border-yellow-700"
+                    : "border-red-900";
+                  const statusLabel = allFired ? "COVERED" : someFired ? "PARTIAL" : "GAP";
+                  const statusColor = allFired ? "text-green-400" : someFired ? "text-yellow-400" : "text-red-400";
+                  const badgeBg = allFired ? "bg-green-500/15" : someFired ? "bg-yellow-500/15" : "bg-red-500/15";
+
+                  return (
+                    <div
+                      key={i}
+                      className={`p-4 rounded-lg border ${borderColor} hover:border-gray-500 transition-colors`}
+                      style={{ background: bgColor }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`text-xs font-mono ${tech.framework === "atlas" ? "text-purple-400" : "text-red-400"}`}>
+                          {tech.technique_id}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${badgeBg} ${statusColor} font-medium`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                      <div className="text-sm text-white mt-1">
+                        {TECHNIQUE_NAMES[tech.technique_id] || tech.technique_id}
+                      </div>
+                      <div className="flex items-center justify-between mt-2">
+                        <span className="text-xs text-gray-500">{tech.tactic}</span>
+                        <span className={`text-sm font-bold ${statusColor}`}>
+                          {tech.rules_fired}/{tech.rules_total}
+                        </span>
+                      </div>
+                      {tech.alert_count > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">{tech.alert_count} alerts</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Per-Rule Coverage Table */}
+          {coverage && coverage.rules.length > 0 && (
+            <div className="card overflow-hidden">
+              <div className="p-4 border-b border-gray-800">
+                <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider">Per-Rule Detection Status</h3>
+              </div>
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase">
+                    <th className="text-left px-4 py-3">Rule</th>
+                    <th className="text-left px-4 py-3">Module</th>
+                    <th className="text-left px-4 py-3">Technique</th>
+                    <th className="text-left px-4 py-3">Status</th>
+                    <th className="text-right px-4 py-3">Alerts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {coverage.rules.map((rule, i) => (
+                    <tr key={i} className="border-b border-gray-800/50 hover:bg-white/[0.02]">
+                      <td className="px-4 py-2 text-sm text-white font-mono">{rule.rule}</td>
+                      <td className="px-4 py-2 text-xs text-gray-400">{rule.module}</td>
+                      <td className="px-4 py-2">
+                        <span className={`text-xs font-mono ${rule.framework === "atlas" ? "text-purple-400" : "text-red-400"}`}>
+                          {rule.technique}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2">
+                        <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                          rule.fired
+                            ? "bg-green-500/15 text-green-400"
+                            : "bg-red-500/15 text-red-400"
+                        }`}>
+                          {rule.fired ? "FIRING" : "NOT SEEN"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-right text-sm font-bold text-white">
+                        {rule.alert_count}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* MITRE ATT&CK Heatmap */}
           {mitre.mitre.length > 0 && (
             <div className="card p-6">
-              <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">MITRE ATT&CK Techniques</h3>
+              <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">MITRE ATT&CK Techniques (by alert volume)</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {mitre.mitre.map((t, i) => {
                   const intensity = Math.min(t.hits / 50, 1);
@@ -291,7 +421,7 @@ export default function AnalyticsPage() {
             </div>
           )}
 
-          {mitre.mitre.length === 0 && mitre.atlas.length === 0 && (
+          {mitre.mitre.length === 0 && mitre.atlas.length === 0 && (!coverage || coverage.rules.length === 0) && (
             <div className="card p-12 text-center text-gray-500">
               No MITRE technique data available yet. Run attack simulations to populate.
             </div>

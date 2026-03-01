@@ -18,6 +18,7 @@ from enum import Enum
 import structlog
 
 from runtime.tools import get_asset_context, get_related_incidents, is_llm_available
+from runtime.observability import log_generation
 
 logger = structlog.get_logger()
 
@@ -297,6 +298,17 @@ Respond in this exact JSON format:
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text
+
+        # Log to Langfuse
+        log_generation(
+            agent="triage",
+            model="claude-haiku-4-5-20251001",
+            input_text=prompt,
+            output_text=text,
+            tokens_input=response.usage.input_tokens,
+            tokens_output=response.usage.output_tokens,
+            success=True,
+        )
 
         # Parse JSON from response
         # Find JSON block

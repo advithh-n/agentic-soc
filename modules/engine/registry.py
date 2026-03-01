@@ -58,5 +58,8 @@ def build_registry() -> ModuleRegistry:
     from ai_agent_monitor.module import AiAgentMonitorModule
     registry.register(AiAgentMonitorModule())
 
+    from recon.module import ReconModule
+    registry.register(ReconModule())
+
     logger.info("registry.built", module_count=len(registry.modules))
     return registry

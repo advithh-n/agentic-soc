@@ -23,7 +23,8 @@ import asyncpg
 import structlog
 
 from runtime.execution_tracer import ExecutionTracer, StepTimer
-from runtime.tools import is_llm_available
+from runtime.observability import log_generation
+from runtime.tools import is_llm_available, summarize_context
 
 logger = structlog.get_logger()
 
@@ -408,13 +409,20 @@ async def critic_llm(
     if not api_key:
         return rb_result
 
+    # Summarize blast radius if large
+    blast_text = json.dumps(investigation_result.get("blast_radius", {}), default=str)
+    if len(blast_text) > 500:
+        blast_text = await summarize_context(blast_text, max_tokens=200)
+    else:
+        blast_text = blast_text[:500]
+
     prompt = f"""You are a senior SOC manager reviewing an investigation and proposed response actions.
 
 INVESTIGATION SUMMARY:
 - Confidence: {investigation_result.get('confidence', 0):.0%}
 - Root Cause: {investigation_result.get('root_cause', 'unknown')}
 - IOCs: {len(investigation_result.get('iocs', []))}
-- Blast Radius: {json.dumps(investigation_result.get('blast_radius', {}), default=str)[:500]}
+- Blast Radius: {blast_text}
 - Timeline Events: {len(investigation_result.get('timeline', []))}
 
 RESPONSE ACTIONS (pending human review):
@@ -447,6 +455,17 @@ For each escalated action, provide your recommendation as JSON:
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text
+
+        # Log to Langfuse
+        log_generation(
+            agent="critic",
+            model="claude-sonnet-4-5-20250929",
+            input_text=prompt,
+            output_text=text,
+            tokens_input=response.usage.input_tokens,
+            tokens_output=response.usage.output_tokens,
+            success=True,
+        )
 
         start = text.find("{")
         end = text.rfind("}") + 1

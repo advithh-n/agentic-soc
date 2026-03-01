@@ -16,6 +16,7 @@ Modes:
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -29,8 +30,17 @@ from runtime.investigation_tools import (
     query_cloudtrail,
     traverse_blast_radius,
     update_knowledge_graph,
+    search_exploits,
+    link_ioc_to_threat_actor,
 )
-from runtime.tools import get_asset_context, get_related_incidents, query_graph, is_llm_available
+from runtime.memory import (
+    recall_similar_investigations,
+    store_investigation_memory,
+    store_alert_embedding,
+    find_similar_alerts,
+)
+from runtime.observability import log_generation
+from runtime.tools import get_asset_context, get_related_incidents, query_graph, is_llm_available, summarize_context
 
 logger = structlog.get_logger()
 
@@ -505,8 +515,15 @@ def _determine_root_cause(alert: dict, timeline: list[dict], correlation: dict) 
 
 # ─── Step 6: IOC EXTRACTION ─────────────────────────────
 
-def _extract_iocs(artifacts: dict, correlation: dict) -> list[dict]:
-    """Collect all indicators of compromise with enrichment data."""
+CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
+
+
+async def _extract_iocs(artifacts: dict, correlation: dict) -> list[dict]:
+    """Collect all indicators of compromise with enrichment data.
+
+    Also searches Sploitus for exploits matching CVE-pattern IOCs
+    and attempts threat actor attribution for high-threat IOCs.
+    """
     iocs = []
 
     for ip in artifacts["ips"]:
@@ -516,20 +533,31 @@ def _extract_iocs(artifacts: dict, correlation: dict) -> list[dict]:
             or rep.get("abuse_score")
             or 0
         )
-        iocs.append({
+        ioc = {
             "type": "ip",
             "value": ip,
             "abuse_score": abuse_score,
             "is_tor": rep.get("data", {}).get("isTor", False) or rep.get("is_tor", False),
             "country": rep.get("data", {}).get("countryCode") or rep.get("country", ""),
             "threat_level": "high" if abuse_score > 50 else ("medium" if abuse_score > 20 else "low"),
-        })
+            "exploit_available": False,
+        }
+
+        # Attempt threat actor attribution for high-threat IPs
+        if ioc["threat_level"] == "high":
+            attribution = await link_ioc_to_threat_actor("ip", ip)
+            if attribution.get("attributed"):
+                ioc["threat_actor"] = attribution.get("threat_actor", "")
+                ioc["campaign"] = attribution.get("campaign", "")
+
+        iocs.append(ioc)
 
     for email in artifacts["emails"]:
         iocs.append({
             "type": "email",
             "value": email,
             "threat_level": "medium",
+            "exploit_available": False,
         })
 
     for domain in artifacts["domains"]:
@@ -537,6 +565,7 @@ def _extract_iocs(artifacts: dict, correlation: dict) -> list[dict]:
             "type": "domain",
             "value": domain,
             "threat_level": "medium",
+            "exploit_available": False,
         })
 
     for card_bin in artifacts["card_bins"]:
@@ -544,7 +573,23 @@ def _extract_iocs(artifacts: dict, correlation: dict) -> list[dict]:
             "type": "card_bin",
             "value": card_bin,
             "threat_level": "high",
+            "exploit_available": False,
         })
+
+    # Search Sploitus for CVE-pattern IOCs found in alert text
+    all_text = json.dumps(artifacts) + json.dumps(correlation.get("cloudtrail_events", []))
+    cve_matches = CVE_PATTERN.findall(all_text)
+    for cve_id in set(cve_matches[:5]):  # Limit to 5 CVEs
+        exploit_data = await search_exploits(cve_id)
+        if exploit_data.get("found"):
+            iocs.append({
+                "type": "cve",
+                "value": cve_id,
+                "threat_level": "high",
+                "exploit_available": True,
+                "exploit_count": exploit_data.get("exploit_count", 0),
+                "exploits": exploit_data.get("exploits", [])[:3],
+            })
 
     return iocs
 
@@ -880,6 +925,30 @@ async def investigate_rule_based(
     alert_id = alert["id"]
     tracer = ExecutionTracer(db_pool, tenant_id, alert_id)
 
+    # Step 0: MEMORY_RECALL — query similar past investigations
+    recalled_memories = []
+    with StepTimer() as t:
+        event_type = alert.get("event_type", "")
+        ioc_summary = f"{alert.get('title', '')} {event_type}"
+        recalled_memories = await recall_similar_investigations(
+            db_pool, tenant_id, event_type, ioc_summary, limit=5,
+        )
+        similar_alerts = await find_similar_alerts(
+            db_pool, tenant_id, ioc_summary, limit=3,
+        )
+    await tracer.log_step(
+        "memory_recall",
+        input_data={"event_type": event_type},
+        output_data={
+            "recalled_memories": len(recalled_memories),
+            "similar_alerts": len(similar_alerts),
+        },
+        duration_ms=t.duration_ms,
+    )
+    if recalled_memories:
+        logger.info("investigation.step.memory_recall", alert_id=alert_id,
+                     memories=len(recalled_memories), similar=len(similar_alerts))
+
     # Step 1: INTAKE
     with StepTimer() as t:
         artifacts = _extract_artifacts(alert, triage_result)
@@ -887,6 +956,10 @@ async def investigate_rule_based(
         "intake", input_data={"alert_id": alert_id}, output_data=artifacts, duration_ms=t.duration_ms,
     )
     logger.info("investigation.step.intake", alert_id=alert_id, ips=len(artifacts["ips"]), emails=len(artifacts["emails"]))
+
+    # Store alert embedding for future similarity searches
+    alert_text = f"{alert.get('title', '')} {alert.get('event_type', '')} {alert.get('description', '')}"
+    await store_alert_embedding(db_pool, tenant_id, alert_id, alert_text)
 
     # Step 2: CORRELATION
     with StepTimer() as t:
@@ -929,9 +1002,9 @@ async def investigate_rule_based(
         "root_cause", output_data={"root_cause": root_cause}, duration_ms=t.duration_ms,
     )
 
-    # Step 6: IOC EXTRACTION
+    # Step 6: IOC EXTRACTION (async — includes Sploitus exploit search + threat actor attribution)
     with StepTimer() as t:
-        iocs = _extract_iocs(artifacts, correlation)
+        iocs = await _extract_iocs(artifacts, correlation)
     await tracer.log_step(
         "ioc_extraction", output_data={"ioc_count": len(iocs), "iocs": iocs}, duration_ms=t.duration_ms,
     )
@@ -958,6 +1031,35 @@ async def investigate_rule_based(
         output_data={"actions": response_actions, "requires_critic": requires_critic},
         duration_ms=t.duration_ms,
     )
+
+    # Store investigation summary as memory fact for future recall
+    memory_content = (
+        f"event_type={alert.get('event_type', '')} "
+        f"root_cause={root_cause[:300]} "
+        f"ioc_count={len(iocs)} actions={len(response_actions)} "
+        f"confidence={_calculate_confidence(artifacts, correlation, iocs)}"
+    )
+    await store_investigation_memory(
+        db_pool, tenant_id, "investigation",
+        memory_type="fact",
+        content=memory_content,
+        confidence=_calculate_confidence(artifacts, correlation, iocs),
+        source_incident=incident_id,
+    )
+    # Store pattern if high-confidence investigation
+    if _calculate_confidence(artifacts, correlation, iocs) >= 0.7:
+        pattern_content = (
+            f"pattern: {alert.get('event_type', '')} with "
+            f"{len(artifacts['ips'])} IPs, {len(artifacts['emails'])} emails "
+            f"-> {len(response_actions)} actions proposed"
+        )
+        await store_investigation_memory(
+            db_pool, tenant_id, "investigation",
+            memory_type="pattern",
+            content=pattern_content,
+            confidence=_calculate_confidence(artifacts, correlation, iocs),
+            source_incident=incident_id,
+        )
 
     # Update knowledge graph with IOCs
     for ioc in iocs:
@@ -1039,6 +1141,30 @@ async def investigate_llm(
     if not api_key:
         return rb_result
 
+    # Recall memories for LLM context
+    event_type = alert.get("event_type", "")
+    ioc_summary = f"{alert.get('title', '')} {event_type}"
+    memories = await recall_similar_investigations(
+        db_pool, alert["tenant_id"], event_type, ioc_summary, limit=3,
+    )
+    memory_context = ""
+    if memories:
+        memory_lines = [f"  - [{m['type']}] {m['content'][:200]}" for m in memories[:3]]
+        memory_context = "\n\nPAST INVESTIGATION MEMORIES:\n" + "\n".join(memory_lines)
+
+    # Summarize large context sections to stay within token limits
+    timeline_text = json.dumps(rb_result.timeline[:10], indent=2, default=str)
+    blast_text = json.dumps(rb_result.blast_radius, indent=2, default=str)
+    iocs_text = json.dumps(rb_result.iocs[:10], indent=2, default=str)
+
+    combined_len = len(timeline_text) + len(iocs_text) + len(blast_text)
+    if combined_len > 3000:
+        context_block = f"TIMELINE:\n{timeline_text}\n\nIOCs:\n{iocs_text}\n\nBLAST RADIUS:\n{blast_text}"
+        summarized = await summarize_context(context_block, max_tokens=600)
+        timeline_text = summarized
+        blast_text = "(included in summary above)"
+        iocs_text = "(included in summary above)"
+
     # Build LLM prompt with all gathered context
     prompt = f"""You are a senior SOC analyst performing a deep investigation on an escalated security alert.
 All the raw data has been gathered. Synthesize it into a clear, actionable analysis.
@@ -1051,16 +1177,16 @@ ALERT:
 
 TRIAGE RESULT:
 - Verdict: {triage_result.get('verdict')}
-- Reasoning: {triage_result.get('reasoning')}
+- Reasoning: {triage_result.get('reasoning')}{memory_context}
 
 TIMELINE ({len(rb_result.timeline)} events):
-{json.dumps(rb_result.timeline[:10], indent=2, default=str)}
+{timeline_text}
 
 BLAST RADIUS:
-{json.dumps(rb_result.blast_radius, indent=2, default=str)}
+{blast_text}
 
 IOCs ({len(rb_result.iocs)}):
-{json.dumps(rb_result.iocs[:10], indent=2, default=str)}
+{iocs_text}
 
 CURRENT ROOT CAUSE ANALYSIS:
 {rb_result.root_cause}
@@ -1085,6 +1211,17 @@ Provide your analysis as JSON:
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text
+
+        # Log to Langfuse
+        log_generation(
+            agent="investigation",
+            model="claude-sonnet-4-5-20250929",
+            input_text=prompt,
+            output_text=text,
+            tokens_input=response.usage.input_tokens,
+            tokens_output=response.usage.output_tokens,
+            success=True,
+        )
 
         start = text.find("{")
         end = text.rfind("}") + 1

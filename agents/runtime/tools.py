@@ -33,6 +33,45 @@ def is_llm_available() -> bool:
     return _llm_available
 
 
+# ─── Chain summarization ─────────────────────────────────
+
+async def summarize_context(text: str, max_tokens: int = 500) -> str:
+    """Summarize long context using Claude Haiku for cheap summarization.
+
+    Falls back to simple truncation if LLM is unavailable.
+    """
+    if len(text) <= 3000:
+        return text
+
+    if not is_llm_available():
+        # Truncation fallback: keep first and last portions
+        half = 1400
+        return text[:half] + "\n...[truncated]...\n" + text[-half:]
+
+    try:
+        import anthropic
+
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max_tokens,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Summarize this SOC investigation context concisely, preserving "
+                    "all IOCs, IPs, timestamps, MITRE techniques, and key findings:\n\n"
+                    + text[:6000]
+                ),
+            }],
+        )
+        return response.content[0].text
+    except Exception as e:
+        logger.warning("summarize.failed", error=str(e))
+        half = 1400
+        return text[:half] + "\n...[truncated]...\n" + text[-half:]
+
+
 async def get_asset_context(entity_type: str, entity_value: str) -> dict:
     """Query Neo4j for asset context about an IP, user, or service."""
     try:

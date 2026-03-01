@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_serializer
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -239,7 +240,7 @@ async def generate_incident_report(
     )
     actions = action_result.scalars().all()
 
-    return {
+    report_data = {
         "report": {
             "generated_at": datetime.utcnow().isoformat(),
             "generated_by": current_user["email"],
@@ -294,3 +295,40 @@ async def generate_incident_report(
             },
         }
     }
+    return report_data
+
+
+@router.get("/{incident_id}/report/pdf")
+async def generate_incident_pdf_endpoint(
+    incident_id: UUID,
+    db: AsyncSession = Depends(set_tenant_context),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate a PDF report for an incident. Returns a downloadable PDF file."""
+    from app.services.report_generator import generate_incident_pdf, store_report_in_minio
+
+    # Reuse the JSON report endpoint logic
+    report_response = await generate_incident_report(incident_id, db, current_user)
+    report_data = report_response["report"]
+
+    # Generate PDF
+    pdf_bytes = generate_incident_pdf(report_data)
+
+    # Store in MinIO (best effort)
+    await store_report_in_minio(pdf_bytes, str(incident_id))
+
+    # Write audit log
+    await write_audit_log(
+        db, current_user["tenant_id"], "user", str(current_user["user_id"]),
+        "incident.report_pdf", "incident", str(incident_id),
+        {"format": "pdf", "size_bytes": len(pdf_bytes)},
+    )
+
+    import io
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="incident_{str(incident_id)[:8]}_report.pdf"'
+        },
+    )

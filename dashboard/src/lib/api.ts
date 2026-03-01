@@ -499,6 +499,41 @@ export async function getActionBreakdown() {
   return apiFetch<ActionBreakdown>("/api/v1/analytics/action-breakdown");
 }
 
+// Detection Coverage
+export interface DetectionCoverageRule {
+  rule: string;
+  module: string;
+  technique: string;
+  framework: string;
+  tactic: string;
+  fired: boolean;
+  alert_count: number;
+}
+
+export interface DetectionCoverageTechnique {
+  technique_id: string;
+  framework: string;
+  tactic: string;
+  rules_total: number;
+  rules_fired: number;
+  alert_count: number;
+}
+
+export interface DetectionCoverage {
+  total_rules: number;
+  rules_fired: number;
+  detection_rate_pct: number;
+  total_techniques: number;
+  techniques_covered: number;
+  technique_coverage_pct: number;
+  rules: DetectionCoverageRule[];
+  techniques: DetectionCoverageTechnique[];
+}
+
+export async function getDetectionCoverage() {
+  return apiFetch<DetectionCoverage>("/api/v1/analytics/detection-coverage");
+}
+
 // ─── Admin: User Management ─────────────────────────────
 
 export interface AdminUser {

@@ -1,8 +1,8 @@
 """Extended MCP tool wrappers for the Investigation Agent.
 
 Provides access to CloudTrail, AbuseIPDB, Neo4j blast-radius traversal,
-and knowledge-graph updates.  Functions that hit endpoints not yet deployed
-return graceful stubs ({available: false}).
+knowledge-graph updates, Wazuh alerts, Clerk sessions, and Langfuse traces.
+All tools call MCP server endpoints with graceful error handling.
 """
 
 import os
@@ -146,21 +146,101 @@ async def update_knowledge_graph(
         return {"success": False, "error": str(e)}
 
 
-# ─── Graceful Stubs (MCP endpoints not yet deployed) ────
+# ─── Sploitus Exploit Search ─────────────────────────────
+
+async def search_exploits(query: str, search_type: str = "exploits") -> dict:
+    """Search Sploitus for known exploits matching a CVE or keyword."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/sploitus/search",
+                json={"query": query, "type": search_type, "limit": 5},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.sploitus.failed", query=query, error=str(e))
+        return {"found": False, "exploits": [], "error": str(e)}
+
+
+# ─── Threat Actor Attribution ────────────────────────────
+
+async def link_ioc_to_threat_actor(ioc_type: str, ioc_value: str) -> dict:
+    """Attempt to attribute an IOC to a known threat actor via graph traversal."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/neo4j/link-ioc-threat-actor",
+                json={"ioc_type": ioc_type, "ioc_value": ioc_value},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.threat_actor_link.failed", error=str(e))
+        return {"attributed": False, "error": str(e)}
+
+
+async def get_threat_actor_profile(actor_name: str) -> dict:
+    """Get full threat actor profile with associated IOCs/campaigns/TTPs."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/neo4j/threat-actor-profile",
+                json={"actor_name": actor_name},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.threat_actor_profile.failed", error=str(e))
+        return {"found": False, "error": str(e)}
+
+
+# ─── Clerk Sessions ──────────────────────────────────────
 
 async def query_clerk_sessions(user_id: str) -> dict:
-    """Query Clerk for active sessions — stub until MCP endpoint exists."""
-    logger.debug("tool.clerk_sessions.stub", user_id=user_id)
-    return {"available": False, "reason": "clerk MCP endpoint not deployed"}
+    """Query Clerk for active sessions via MCP server."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/clerk/query-sessions",
+                json={"user_id": user_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.clerk_sessions.failed", user_id=user_id, error=str(e))
+        return {"sessions": [], "count": 0, "error": str(e)}
 
+
+# ─── Wazuh Alerts ────────────────────────────────────────
 
 async def query_wazuh_alerts(ip: str | None = None, hostname: str | None = None) -> dict:
-    """Query Wazuh for host-level alerts — stub until MCP endpoint exists."""
-    logger.debug("tool.wazuh_alerts.stub", ip=ip, hostname=hostname)
-    return {"available": False, "reason": "wazuh MCP endpoint not deployed"}
+    """Query Wazuh for host-level alerts via MCP server."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/wazuh/query-alerts",
+                json={"agent_name": hostname, "source_ip": ip},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.wazuh_alerts.failed", error=str(e))
+        return {"alerts": [], "count": 0, "error": str(e)}
 
+
+# ─── Langfuse Traces ────────────────────────────────────
 
 async def get_langfuse_traces(trace_id: str) -> dict:
-    """Retrieve Langfuse LLM traces — stub until MCP endpoint exists."""
-    logger.debug("tool.langfuse_traces.stub", trace_id=trace_id)
-    return {"available": False, "reason": "langfuse MCP endpoint not deployed"}
+    """Retrieve Langfuse LLM traces via MCP server."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{MCP_BASE}/langfuse/query-traces",
+                json={"trace_id": trace_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.warning("tool.langfuse_traces.failed", trace_id=trace_id, error=str(e))
+        return {"traces": [], "count": 0, "error": str(e)}

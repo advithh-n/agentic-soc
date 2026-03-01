@@ -259,6 +259,106 @@ async def update_graph(req: GraphUpdateRequest):
         raise HTTPException(400, f"Unknown operation: {req.operation}")
 
 
+class IOCAttributionRequest(BaseModel):
+    ioc_type: str  # "ip", "domain", "email"
+    ioc_value: str
+
+
+class ThreatActorProfileRequest(BaseModel):
+    actor_name: str
+
+
+@router.post("/link-ioc-threat-actor")
+async def link_ioc_threat_actor(req: IOCAttributionRequest):
+    """Attempt to attribute an IOC to a known threat actor via graph traversal.
+
+    Traverses: IOC value → IP/IOC node → USES_IOC → ThreatActor → CONDUCTS → Campaign
+    """
+    driver = await _get_driver()
+
+    # Try direct IOC node match
+    query = """
+    OPTIONAL MATCH (i:IOC {value: $value})<-[:USES_IOC]-(ta:ThreatActor)
+    OPTIONAL MATCH (ta)-[:CONDUCTS]->(c:Campaign)
+    WITH ta, collect(DISTINCT c.name) AS campaigns
+    WHERE ta IS NOT NULL
+    RETURN ta.name AS threat_actor, ta.origin AS origin,
+           ta.motivation AS motivation, ta.ttps AS ttps,
+           campaigns
+    LIMIT 1
+    """
+
+    async with driver.session() as session:
+        result = await session.run(query, value=req.ioc_value)
+        record = await result.single()
+
+    if not record or not record["threat_actor"]:
+        # Fallback: check if IP is linked to a ThreatActor-labeled node
+        ip_query = """
+        MATCH (ip:IP {address: $value})
+        WHERE ip:ThreatActor
+        RETURN ip.label AS threat_actor, 'unknown' AS origin,
+               'unknown' AS motivation, '' AS ttps,
+               [] AS campaigns
+        LIMIT 1
+        """
+        async with driver.session() as session:
+            result = await session.run(ip_query, value=req.ioc_value)
+            record = await result.single()
+
+    if not record or not record["threat_actor"]:
+        return {
+            "attributed": False,
+            "ioc_type": req.ioc_type,
+            "ioc_value": req.ioc_value,
+        }
+
+    return {
+        "attributed": True,
+        "ioc_type": req.ioc_type,
+        "ioc_value": req.ioc_value,
+        "threat_actor": record["threat_actor"],
+        "origin": record["origin"],
+        "motivation": record["motivation"],
+        "ttps": record["ttps"],
+        "campaigns": record["campaigns"],
+    }
+
+
+@router.post("/threat-actor-profile")
+async def threat_actor_profile(req: ThreatActorProfileRequest):
+    """Get full threat actor profile with associated IOCs, campaigns, and TTPs."""
+    driver = await _get_driver()
+
+    query = """
+    MATCH (ta:ThreatActor {name: $name})
+    OPTIONAL MATCH (ta)-[:USES_IOC]->(i:IOC)
+    OPTIONAL MATCH (ta)-[:CONDUCTS]->(c:Campaign)
+    RETURN ta,
+           collect(DISTINCT {value: i.value, type: i.type}) AS iocs,
+           collect(DISTINCT {name: c.name, status: c.status,
+                             target_sector: c.target_sector,
+                             description: c.description}) AS campaigns
+    """
+
+    async with driver.session() as session:
+        result = await session.run(query, name=req.actor_name)
+        record = await result.single()
+
+    if not record:
+        return {"found": False, "actor_name": req.actor_name}
+
+    ta_props = dict(record["ta"])
+    return {
+        "found": True,
+        "actor_name": req.actor_name,
+        "properties": ta_props,
+        "iocs": [i for i in record["iocs"] if i.get("value")],
+        "campaigns": [c for c in record["campaigns"] if c.get("name")],
+        "ttps": ta_props.get("ttps", "").split(",") if ta_props.get("ttps") else [],
+    }
+
+
 @router.get("/stats")
 async def graph_stats():
     """Get graph statistics."""

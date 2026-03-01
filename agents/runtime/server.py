@@ -25,6 +25,7 @@ from runtime.integrations.registry import register_all_adapters
 from runtime.action_executor import ActionExecutor
 from runtime.playbook_engine import PlaybookEngine
 from runtime.tools import is_llm_available
+from runtime.observability import init_langfuse, flush as langfuse_flush, shutdown as langfuse_shutdown
 
 logger = structlog.get_logger()
 
@@ -104,6 +105,9 @@ class AgentRuntime:
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
+
+        # Initialize Langfuse observability
+        init_langfuse()
 
         # Initialize response automation
         register_all_adapters()
@@ -398,6 +402,8 @@ class AgentRuntime:
     async def stop(self):
         """Graceful shutdown."""
         self.running = False
+        langfuse_flush()
+        langfuse_shutdown()
         if self.redis:
             await self.redis.aclose()
         if self.db_pool:

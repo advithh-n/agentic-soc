@@ -16,6 +16,10 @@ from fastapi import FastAPI
 from neo4j_tools import router as neo4j_router, init_driver, close_driver
 from abuseipdb_tools import router as abuseipdb_router, init_redis as init_abuseipdb_redis
 from aws_tools import router as aws_router
+from sploitus_tools import router as sploitus_router, init_redis as init_sploitus_redis
+from wazuh_tools import router as wazuh_router, init_redis as init_wazuh_redis
+from clerk_tools import router as clerk_router, init_redis as init_clerk_redis
+from langfuse_tools import router as langfuse_router, init_redis as init_langfuse_redis
 
 logger = structlog.get_logger()
 
@@ -43,6 +47,10 @@ async def lifespan(app: FastAPI):
         )
         await _redis_client.ping()
         await init_abuseipdb_redis(_redis_client)
+        await init_sploitus_redis(_redis_client)
+        await init_wazuh_redis(_redis_client)
+        await init_clerk_redis(_redis_client)
+        await init_langfuse_redis(_redis_client)
         logger.info("mcp.redis_connected")
     except Exception as e:
         logger.warning("mcp.redis_failed", error=str(e))
@@ -62,14 +70,18 @@ app = FastAPI(title="Agentic SOC — MCP Tool Servers", lifespan=lifespan)
 app.include_router(neo4j_router)
 app.include_router(abuseipdb_router)
 app.include_router(aws_router)
+app.include_router(sploitus_router)
+app.include_router(wazuh_router)
+app.include_router(clerk_router)
+app.include_router(langfuse_router)
 
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "servers": ["neo4j", "abuseipdb", "aws"],
-        "tools_registered": 8,
+        "servers": ["neo4j", "abuseipdb", "aws", "sploitus", "wazuh", "clerk", "langfuse"],
+        "tools_registered": 15,
     }
 
 

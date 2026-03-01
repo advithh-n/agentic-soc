@@ -17,4 +17,5 @@ dependencies = [
     "structlog>=24.4.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
+    "langfuse>=2.0.0",
 ]
